@@ -1,0 +1,5 @@
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install "fastapi[standard]"
+pip install requests
+uvicorn filename:app --host 0.0.0.0 --port 8000
