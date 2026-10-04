@@ -5,6 +5,7 @@ import requests
 
 app = FastAPI()
 
+
 # =========================
 # TELEGRAM CONFIG
 # =========================
@@ -12,7 +13,8 @@ app = FastAPI()
 BOT_TOKEN = "8816106296:AAFBHX48tr81flCUx2ykj3dHQT6dueoX3Rc"
 
 CHAT_IDS = [
-    "998365076"
+    "998365076",
+    "8930948558"
 ]
 
 
@@ -36,8 +38,11 @@ latest_gps = None
 
 def send_telegram(data: GPSData):
 
+    # Google Maps link
+    maps_url = f"https://www.google.com/maps?q={data.lat},{data.lon}"
+
     message = (
-        "📍 Smart GPS\n\n"
+        "📍 Fast GPS\n\n"
         f"Latitude  : {data.lat}\n"
         f"Longitude : {data.lon}\n"
         f"Speed     : {data.speed} km/h\n"
@@ -52,7 +57,19 @@ def send_telegram(data: GPSData):
             url,
             json={
                 "chat_id": chat_id,
-                "text": message
+                "text": message,
+
+                # Tombol Google Maps
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "📍 Buka Google Maps",
+                                "url": maps_url
+                            }
+                        ]
+                    ]
+                }
             },
             timeout=10
         )
@@ -69,9 +86,10 @@ def receive_gps(data: GPSData):
 
     global latest_gps
 
+    # Simpan GPS terakhir
     latest_gps = data
 
-    # Kirim data GPS ke Telegram
+    # Kirim ke Telegram
     send_telegram(data)
 
     return {
