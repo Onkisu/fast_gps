@@ -4,3 +4,447 @@ pip install "fastapi[standard]"
 pip install requests
 uvicorn filename:app --host 0.0.0.0 --port 8000
 fast-gps-7pxh.vercel.app/gps
+
+
+#include <TinyGPSPlus.h>
+#include <HardwareSerial.h>
+#include <HTTPClient.h>
+
+// =====================================================
+// GPS
+// =====================================================
+TinyGPSPlus gps;
+HardwareSerial GPS_Serial(1);
+
+#define GPS_RX 4
+#define GPS_TX 5
+
+
+// =====================================================
+// SIM800L
+// =====================================================
+HardwareSerial SIM800L(2);
+
+#define SIM800_RX 6   // ESP32 RX <- SIM800L TX
+#define SIM800_TX 7   // ESP32 TX -> SIM800L RX
+
+#define SIM800_BAUD 9600
+
+
+// =====================================================
+// APN SIM CARD
+// GANTI SESUAI OPERATOR
+// =====================================================
+const char* APN      = "internet";
+const char* GPRS_USER = "";
+const char* GPRS_PASS = "";
+
+
+// =====================================================
+// API SERVER
+// =====================================================
+const char* apiURL = "fast-gps-7pxh.vercel.app/gps";
+
+// Kirim setiap 1 menit
+const unsigned long POST_INTERVAL = 60000;
+
+unsigned long lastPostTime = 0;
+
+
+// =====================================================
+// SETUP
+// =====================================================
+void setup() {
+
+  Serial.begin(115200);
+
+  // ===================================================
+  // GPS
+  // ===================================================
+  GPS_Serial.begin(
+    9600,
+    SERIAL_8N1,
+    GPS_RX,
+    GPS_TX
+  );
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("ESP32 GPS + SIM800L START");
+  Serial.println("================================");
+
+
+  // ===================================================
+  // SIM800L
+  // ===================================================
+  SIM800L.begin(
+    SIM800_BAUD,
+    SERIAL_8N1,
+    SIM800_RX,
+    SIM800_TX
+  );
+
+  delay(1000);
+
+  Serial.println("Inisialisasi SIM800L...");
+
+  initSIM800L();
+
+  Serial.println("Menunggu data GPS...");
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+void loop() {
+
+  // ===================================================
+  // BACA GPS
+  // ===================================================
+  while (GPS_Serial.available() > 0) {
+    gps.encode(GPS_Serial.read());
+  }
+
+
+  // ===================================================
+  // TAMPILKAN GPS JIKA UPDATE
+  // ===================================================
+  if (gps.location.isUpdated()) {
+
+    Serial.println("====================");
+
+    Serial.print("Latitude  : ");
+    Serial.println(gps.location.lat(), 6);
+
+    Serial.print("Longitude : ");
+    Serial.println(gps.location.lng(), 6);
+
+    Serial.print("Altitude  : ");
+    Serial.print(gps.altitude.meters());
+    Serial.println(" m");
+
+    Serial.print("Speed     : ");
+    Serial.print(gps.speed.kmph());
+    Serial.println(" km/h");
+
+    Serial.print("Satellites: ");
+    Serial.println(gps.satellites.value());
+
+    Serial.println("====================");
+  }
+
+
+  // ===================================================
+  // KIRIM DATA SETIAP 1 MENIT
+  // ===================================================
+  if (millis() - lastPostTime >= POST_INTERVAL) {
+
+    lastPostTime = millis();
+
+    sendGPSData();
+  }
+}
+
+
+// =====================================================
+// INISIALISASI SIM800L
+// =====================================================
+void initSIM800L() {
+
+  sendAT("AT", 1000);
+
+  sendAT("ATE0", 1000);
+
+  // Cek SIM card
+  sendAT("AT+CPIN?", 2000);
+
+  // Cek registrasi jaringan
+  sendAT("AT+CREG?", 2000);
+
+  // Cek kualitas sinyal
+  sendAT("AT+CSQ", 2000);
+
+  // Aktifkan GPRS
+  sendAT("AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"", 2000);
+
+  String apnCommand = "AT+SAPBR=3,1,\"APN\",\"";
+  apnCommand += APN;
+  apnCommand += "\"";
+
+  sendAT(apnCommand, 2000);
+
+  // Username jika diperlukan
+  if (strlen(GPRS_USER) > 0) {
+
+    String userCommand = "AT+SAPBR=3,1,\"USER\",\"";
+    userCommand += GPRS_USER;
+    userCommand += "\"";
+
+    sendAT(userCommand, 2000);
+  }
+
+  // Password jika diperlukan
+  if (strlen(GPRS_PASS) > 0) {
+
+    String passCommand = "AT+SAPBR=3,1,\"PWD\",\"";
+    passCommand += GPRS_PASS;
+    passCommand += "\"";
+
+    sendAT(passCommand, 2000);
+  }
+
+  // Tutup bearer lama
+  sendAT("AT+SAPBR=0,1", 3000);
+
+  // Buka koneksi GPRS
+  Serial.println("Menghubungkan ke GPRS...");
+
+  sendAT("AT+SAPBR=1,1", 10000);
+
+  // Cek status GPRS
+  sendAT("AT+SAPBR=2,1", 3000);
+
+  Serial.println("Inisialisasi SIM800L selesai.");
+
+Serial.println("=== CEK JARINGAN ===");
+
+sendAT("AT+CPIN?", 2000);
+sendAT("AT+CSQ", 2000);
+sendAT("AT+CREG?", 2000);
+sendAT("AT+CGATT?", 2000);
+sendAT("AT+SAPBR=2,1", 3000);
+}
+
+
+
+// =====================================================
+// KIRIM AT COMMAND
+// =====================================================
+void sendAT(String command, unsigned long timeout) {
+
+  Serial.print(">> ");
+  Serial.println(command);
+
+  SIM800L.println(command);
+
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+
+    while (SIM800L.available()) {
+
+      String response = SIM800L.readStringUntil('\n');
+
+      response.trim();
+
+      if (response.length() > 0) {
+        Serial.print("<< ");
+        Serial.println(response);
+      }
+    }
+  }
+}
+
+
+// =====================================================
+// CEK KONEKSI GPRS
+// =====================================================
+bool checkGPRS() {
+
+  SIM800L.println("AT+SAPBR=2,1");
+
+  unsigned long start = millis();
+
+  String response = "";
+
+  while (millis() - start < 3000) {
+
+    while (SIM800L.available()) {
+
+      char c = SIM800L.read();
+
+      response += c;
+    }
+  }
+
+  Serial.println("GPRS Status:");
+  Serial.println(response);
+
+  if (response.indexOf("+SAPBR: 1,1") >= 0) {
+    return true;
+  }
+
+  return false;
+}
+
+
+// =====================================================
+// CONNECT GPRS
+// =====================================================
+bool connectGPRS() {
+
+  Serial.println();
+  Serial.println("Memeriksa koneksi GPRS...");
+
+  if (checkGPRS()) {
+
+    Serial.println("GPRS sudah terhubung.");
+
+    return true;
+  }
+
+  Serial.println("GPRS belum terhubung.");
+  Serial.println("Mencoba koneksi ulang...");
+
+  // Tutup koneksi sebelumnya
+  sendAT("AT+SAPBR=0,1", 3000);
+
+  // Set APN
+  sendAT("AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"", 2000);
+
+  String apnCommand = "AT+SAPBR=3,1,\"APN\",\"";
+  apnCommand += APN;
+  apnCommand += "\"";
+
+  sendAT(apnCommand, 2000);
+
+  // Buka GPRS
+  sendAT("AT+SAPBR=1,1", 10000);
+
+  // Cek
+  if (checkGPRS()) {
+
+    Serial.println("GPRS berhasil terhubung.");
+
+    return true;
+  }
+
+  Serial.println("GPRS gagal terhubung.");
+
+  return false;
+}
+
+
+// =====================================================
+// SEND GPS DATA
+// =====================================================
+void sendGPSData() {
+
+  // ===================================================
+  // CEK GPS
+  // ===================================================
+  if (!gps.location.isValid()) {
+
+    Serial.println();
+    Serial.println("GPS belum mendapatkan lokasi valid.");
+
+    return;
+  }
+
+
+  // ===================================================
+  // CEK GPRS
+  // ===================================================
+  if (!connectGPRS()) {
+
+    Serial.println("Tidak dapat terhubung ke internet.");
+
+    return;
+  }
+
+
+  // ===================================================
+  // AMBIL DATA GPS
+  // ===================================================
+  double lat = gps.location.lat();
+
+  double lon = gps.location.lng();
+
+  double speed = gps.speed.isValid()
+                 ? gps.speed.kmph()
+                 : 0;
+
+  double altitude = gps.altitude.isValid()
+                    ? gps.altitude.meters()
+                    : 0;
+
+
+  // ===================================================
+  // BUAT JSON
+  // ===================================================
+  String json = "{";
+
+  json += "\"lon\":";
+  json += String(lon, 6);
+
+  json += ",\"lat\":";
+  json += String(lat, 6);
+
+  json += ",\"speed\":";
+  json += String(speed, 2);
+
+  json += ",\"altitude\":";
+  json += String(altitude, 2);
+
+  json += "}";
+
+
+  // ===================================================
+  // TAMPILKAN DATA
+  // ===================================================
+  Serial.println();
+  Serial.println("================================");
+
+  Serial.println("Mengirim data GPS melalui SIM800L");
+
+  Serial.print("POST: ");
+  Serial.println(apiURL);
+
+  Serial.print("JSON: ");
+  Serial.println(json);
+
+  Serial.println("================================");
+
+
+  // ===================================================
+  // HTTP POST
+  // ===================================================
+  HTTPClient http;
+
+  http.begin(apiURL);
+
+  http.addHeader(
+    "Content-Type",
+    "application/json"
+  );
+
+  int httpCode = http.POST(json);
+
+
+  // ===================================================
+  // HASIL
+  // ===================================================
+  Serial.print("HTTP Response: ");
+  Serial.println(httpCode);
+
+  if (httpCode > 0) {
+
+    String response = http.getString();
+
+    Serial.print("Response API: ");
+    Serial.println(response);
+
+  } else {
+
+    Serial.print("POST gagal: ");
+    Serial.println(
+      http.errorToString(httpCode)
+    );
+  }
+
+
+  http.end();
+
+  Serial.println();
+}
