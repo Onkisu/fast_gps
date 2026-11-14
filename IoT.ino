@@ -1,4 +1,4 @@
-
+ 
 #include <Arduino.h>
 #include <TinyGPSPlus.h>
 
@@ -22,39 +22,50 @@ HardwareSerial SIM800(1);
 #define SIM_TX 7
 
 // =====================================================
-// PINGGY TCP TUNNEL
+// SENSOR GETAR
 // =====================================================
 
-const char* HOST = "fdiqzeurya.a.pinggy.link";
-const int PORT = 25249;
-const char* PATH = "/gps";
+#define VIBRATION_PIN 9
+
+int lastVibrationState = LOW;
+
+unsigned long lastVibrationTime = 0;
+const unsigned long DEBOUNCE_TIME = 100;
 
 // =====================================================
-// TIMING
+// SERVER HTTP
 // =====================================================
 
-unsigned long lastSend = 0;
-const unsigned long SEND_INTERVAL = 60000UL; // 10 menit
-
-int gpsFailCount = 0;
-const int GPS_FAIL_LIMIT = 3;
-
-bool dummySent = false;
-
-// Data dummy
-const float DUMMY_LAT = -6.853744;
-const float DUMMY_LON = 108.015279;
-const float DUMMY_SPEED = 0.0;
-const float DUMMY_ALTITUDE = 370.5;
+const char* SERVER_URL =
+  "http://103.217.144.117:8000/gps";
 
 // =====================================================
-// READ RESPONSE
+// GPS DUMMY
 // =====================================================
 
-String readResponse(unsigned long timeout)
+const double DUMMY_LAT = -6.853744;
+const double DUMMY_LON = 108.015279;
+const double DUMMY_SPEED = 0.0;
+const double DUMMY_ALTITUDE = 370.5;
+
+// =====================================================
+// SEND AT COMMAND
+// =====================================================
+
+String sendAT(const char* cmd, unsigned long timeout)
 {
+  while (SIM800.available())
+  {
+    SIM800.read();
+  }
+
+  Serial.print("\n>> ");
+  Serial.println(cmd);
+
+  SIM800.println(cmd);
+
+  String response;
   unsigned long start = millis();
-  String response = "";
 
   while (millis() - start < timeout)
   {
@@ -62,122 +73,457 @@ String readResponse(unsigned long timeout)
     {
       char c = SIM800.read();
       response += c;
+      Serial.write(c);
     }
+
+    delay(1);
   }
 
   return response;
 }
 
 // =====================================================
-// SEND AT
+// WAIT FOR MODEM RESPONSE
 // =====================================================
 
-String sendAT(const char* cmd, unsigned long timeout)
+bool waitResponse(
+  const char* keyword,
+  unsigned long timeout,
+  String& response
+)
 {
-  Serial.print("\n>> ");
-  Serial.println(cmd);
+  response = "";
 
-  SIM800.println(cmd);
+  unsigned long start = millis();
 
-  String response = readResponse(timeout);
-
-  if (response.length() > 0)
+  while (millis() - start < timeout)
   {
-    Serial.println(response);
+    while (SIM800.available())
+    {
+      char c = SIM800.read();
+
+      response += c;
+      Serial.write(c);
+
+      if (response.indexOf(keyword) >= 0)
+      {
+        return true;
+      }
+    }
+
+    delay(1);
   }
 
-  return response;
+  return false;
 }
 
 // =====================================================
 // SETUP GPRS
 // =====================================================
 
-void setupGPRS()
+bool setupGPRS()
 {
-  sendAT("AT", 1000);
-  sendAT("ATE0", 1000);
-  sendAT("AT+CPIN?", 1000);
-  sendAT("AT+CSQ", 1000);
-  sendAT("AT+CREG?", 1000);
-  sendAT("AT+CGATT?", 1000);
+  Serial.println("\n================================");
+  Serial.println("SETUP GPRS SIM800L");
+  Serial.println("================================");
 
-  sendAT("AT+CIPSHUT", 2000);
+  String response;
+
+  // Cek modem
+  response = sendAT("AT", 1500);
+
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("Modem tidak merespons.");
+    return false;
+  }
+
+  // Nonaktifkan echo
+  sendAT("ATE0", 1000);
+
+  // Periksa SIM card
+  response = sendAT("AT+CPIN?", 1500);
+
+  if (response.indexOf("READY") == -1)
+  {
+    Serial.println("SIM card belum siap.");
+    return false;
+  }
+
+  // Periksa sinyal
+  sendAT("AT+CSQ", 1500);
+
+  // Periksa registrasi jaringan
+  response = sendAT("AT+CREG?", 1500);
+
+  if (response.indexOf(",1") == -1 &&
+      response.indexOf(",5") == -1)
+  {
+    Serial.println("Belum terdaftar pada jaringan GSM.");
+    return false;
+  }
+
+  // Periksa GPRS
+  response = sendAT("AT+CGATT?", 1500);
+
+  if (response.indexOf("+CGATT: 1") == -1)
+  {
+    Serial.println("GPRS belum terhubung.");
+    return false;
+  }
+
+  // Tutup bearer lama jika ada
+  sendAT("AT+SAPBR=0,1", 2000);
+
+  // Konfigurasi bearer GPRS
+  response = sendAT(
+    "AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"",
+    2000
+  );
+
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("Gagal mengatur CONTYPE.");
+    return false;
+  }
 
   // APN Telkomsel
-  sendAT("AT+CSTT=\"internet\",\"\",\"\"", 1000);
+  response = sendAT(
+    "AT+SAPBR=3,1,\"APN\",\"internet\"",
+    2000
+  );
 
-  sendAT("AT+CIICR", 2000);
-  sendAT("AT+CIFSR", 1000);
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("Gagal mengatur APN.");
+    return false;
+  }
+
+  sendAT(
+    "AT+SAPBR=3,1,\"USER\",\"\"",
+    1500
+  );
+
+  sendAT(
+    "AT+SAPBR=3,1,\"PWD\",\"\"",
+    1500
+  );
+
+  // Aktifkan GPRS
+  response = sendAT(
+    "AT+SAPBR=1,1",
+    15000
+  );
+
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("Gagal mengaktifkan bearer GPRS.");
+    return false;
+  }
+
+  // Periksa IP
+  response = sendAT(
+    "AT+SAPBR=2,1",
+    3000
+  );
+
+  if (response.indexOf("+SAPBR: 1,1") == -1)
+  {
+    Serial.println("Bearer GPRS belum aktif.");
+    return false;
+  }
+
+  Serial.println("\nGPRS BERHASIL TERHUBUNG.");
+
+  return true;
 }
 
 // =====================================================
-// SEND GPS VIA TCP TUNNEL
+// INITIALIZE HTTP
+// =====================================================
+
+bool initHTTP()
+{
+  Serial.println("\nMenginisialisasi HTTP...");
+
+  // Bersihkan sesi sebelumnya
+  sendAT("AT+HTTPTERM", 1000);
+
+  String response = sendAT(
+    "AT+HTTPINIT",
+    3000
+  );
+
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("HTTPINIT gagal.");
+    return false;
+  }
+
+  // Pilih bearer GPRS
+  response = sendAT(
+    "AT+HTTPPARA=\"CID\",1",
+    2000
+  );
+
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("Gagal mengatur CID.");
+    return false;
+  }
+
+  // URL server
+  response = sendAT(
+    "AT+HTTPPARA=\"URL\",\"http://103.217.144.117:8000/gps\"",
+    3000
+  );
+
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("Gagal mengatur URL.");
+    return false;
+  }
+
+  // Content-Type JSON
+  response = sendAT(
+    "AT+HTTPPARA=\"CONTENT\",\"application/json\"",
+    2000
+  );
+
+  if (response.indexOf("OK") == -1)
+  {
+    Serial.println("Gagal mengatur Content-Type.");
+    return false;
+  }
+
+  Serial.println("HTTP berhasil diinisialisasi.");
+
+  return true;
+}
+
+// =====================================================
+// SEND HTTP POST
+// =====================================================
+
+bool sendHTTPPost(const String& json)
+{
+  Serial.println("\n================================");
+  Serial.println("HTTP POST");
+  Serial.println("================================");
+
+  Serial.print("URL: ");
+  Serial.println(SERVER_URL);
+
+  Serial.print("JSON: ");
+  Serial.println(json);
+
+  // ---------------------------------------------------
+  // HTTPDATA
+  // ---------------------------------------------------
+
+  Serial.println("\nMenyiapkan HTTPDATA...");
+
+  SIM800.print("AT+HTTPDATA=");
+  SIM800.print(json.length());
+  SIM800.println(",10000");
+
+  String response;
+
+  if (!waitResponse(
+    "DOWNLOAD",
+    10000,
+    response
+  ))
+  {
+    Serial.println("ERROR: DOWNLOAD prompt tidak ditemukan.");
+    return false;
+  }
+
+  // Kirim JSON
+  Serial.println("\nMengirim JSON...");
+
+  size_t sent = SIM800.write(
+    (const uint8_t*)json.c_str(),
+    json.length()
+  );
+
+  if (sent != json.length())
+  {
+    Serial.println("ERROR: Pengiriman JSON tidak lengkap.");
+    return false;
+  }
+
+  // Tunggu modem menerima seluruh JSON
+  if (!waitResponse(
+    "\r\nOK",
+    15000,
+    response
+  ))
+  {
+    Serial.println("ERROR: HTTPDATA gagal.");
+    return false;
+  }
+
+  Serial.println("\nJSON berhasil diterima modem.");
+
+  // ---------------------------------------------------
+  // HTTPACTION POST
+  // ---------------------------------------------------
+
+  Serial.println("\nMenjalankan HTTP POST...");
+
+  SIM800.println("AT+HTTPACTION=1");
+
+  // Tunggu respons HTTPACTION
+  if (!waitResponse(
+    "+HTTPACTION:",
+    60000,
+    response
+  ))
+  {
+    Serial.println("ERROR: HTTPACTION timeout.");
+    return false;
+  }
+
+  // Pastikan seluruh baris respons sudah diterima
+  unsigned long start = millis();
+
+  while (millis() - start < 2000)
+  {
+    while (SIM800.available())
+    {
+      char c = SIM800.read();
+      response += c;
+      Serial.write(c);
+
+      if (c == '\n')
+      {
+        goto HTTP_ACTION_DONE;
+      }
+    }
+
+    delay(1);
+  }
+
+HTTP_ACTION_DONE:
+
+  Serial.println("\n========== HTTP ACTION ==========");
+  Serial.println(response);
+  Serial.println("=================================");
+
+  // Parse:
+  // +HTTPACTION: 1,200,xx
+
+  int firstComma = response.indexOf(',');
+  int secondComma = response.indexOf(
+    ',',
+    firstComma + 1
+  );
+
+  if (firstComma < 0 || secondComma < 0)
+  {
+    Serial.println("Respons HTTPACTION tidak valid.");
+    return false;
+  }
+
+  int httpStatus = response.substring(
+    firstComma + 1,
+    secondComma
+  ).toInt();
+
+  int dataLength = response.substring(
+    secondComma + 1
+  ).toInt();
+
+  Serial.print("HTTP Status: ");
+  Serial.println(httpStatus);
+
+  Serial.print("Response Length: ");
+  Serial.println(dataLength);
+
+  // ---------------------------------------------------
+  // HTTPREAD
+  // ---------------------------------------------------
+
+  Serial.println("\nMembaca respons server...");
+
+  response = sendAT(
+    "AT+HTTPREAD",
+    10000
+  );
+
+  Serial.println("\n========== SERVER RESPONSE ==========");
+  Serial.println(response);
+  Serial.println("=====================================");
+
+  // ---------------------------------------------------
+  // CHECK STATUS
+  // ---------------------------------------------------
+
+  if (httpStatus >= 200 && httpStatus < 300)
+  {
+    Serial.println("\nBERHASIL: HTTP POST diterima server.");
+    return true;
+  }
+
+  Serial.println("\nGAGAL: HTTP status bukan 2xx.");
+
+  return false;
+}
+
+// =====================================================
+// TERMINATE HTTP
+// =====================================================
+
+void terminateHTTP()
+{
+  Serial.println("\nMengakhiri sesi HTTP...");
+
+  sendAT("AT+HTTPTERM", 2000);
+}
+
+// =====================================================
+// SEND GPS
 // =====================================================
 
 void sendGPS()
 {
-  float lat;
-  float lon;
-  float speed;
-  float altitude;
+  double lat;
+  double lon;
+  double speed;
+  double altitude;
 
-  // ===================================================
-  // GPS FIX CHECK / DUMMY DATA
-  // ===================================================
-
-  if (!gps.location.isValid())
+  // GPS asli
+  if (gps.location.isValid() &&
+      gps.location.age() < 10000)
   {
-    gpsFailCount++;
+    lat = gps.location.lat();
+    lon = gps.location.lng();
 
-    Serial.println();
-    Serial.println("GPS BELUM FIX");
+    speed = gps.speed.isValid()
+      ? gps.speed.kmph()
+      : 0.0;
 
-    Serial.print("Percobaan gagal: ");
-    Serial.print(gpsFailCount);
-    Serial.print("/");
-    Serial.println(GPS_FAIL_LIMIT);
+    altitude = gps.altitude.isValid()
+      ? gps.altitude.meters()
+      : 0.0;
 
-    if (gpsFailCount < GPS_FAIL_LIMIT || dummySent)
-    {
-      Serial.println("Pengiriman dilewati.");
-      return;
-    }
-
-    // GPS gagal 3 kali: gunakan data dummy
+    Serial.println("\nMenggunakan GPS asli.");
+  }
+  else
+  {
     lat = DUMMY_LAT;
     lon = DUMMY_LON;
     speed = DUMMY_SPEED;
     altitude = DUMMY_ALTITUDE;
 
-    dummySent = true;
-
-    Serial.println("GPS gagal 3 kali.");
-    Serial.println("MENGIRIM DATA DUMMY");
-  }
-  else
-  {
-    // Gunakan data GPS asli
-    lat = gps.location.lat();
-    lon = gps.location.lng();
-
-    speed = gps.speed.isValid()
-              ? gps.speed.kmph()
-              : 0.0;
-
-    altitude = gps.altitude.isValid()
-                 ? gps.altitude.meters()
-                 : 0.0;
-
-    gpsFailCount = 0;
-    dummySent = false;
-
-    Serial.println("Menggunakan data GPS asli.");
+    Serial.println("\nGPS belum valid.");
+    Serial.println("Menggunakan GPS dummy.");
   }
 
-  // ===================================================
+  // ---------------------------------------------------
   // JSON
-  // ===================================================
+  // ---------------------------------------------------
 
   String json =
     "{\"lat\":" + String(lat, 6) +
@@ -186,140 +532,41 @@ void sendGPS()
     ",\"altitude\":" + String(altitude, 2) +
     "}";
 
-  Serial.println();
-  Serial.println("================================");
-  Serial.println("GPS JSON");
-  Serial.println("================================");
+  Serial.println("\n========== GPS JSON ==========");
   Serial.println(json);
-  Serial.println("================================");
+  Serial.println("==============================");
 
-  // ===================================================
-  // SSL MATI
-  // ===================================================
+  // ---------------------------------------------------
+  // HTTP INITIALIZATION
+  // ---------------------------------------------------
 
-  Serial.println("\nDisabling SSL...");
-
-  sendAT("AT+CIPSSL=0", 3000);
-
-  // ===================================================
-  // CONNECT TCP TUNNEL
-  // ===================================================
-
-  Serial.println("\nConnecting to Pinggy TCP tunnel...");
-
-  SIM800.print("AT+CIPSTART=\"TCP\",\"");
-  SIM800.print(HOST);
-  SIM800.print("\",");
-  SIM800.println(PORT);
-
-  String connectResponse = readResponse(3000);
-
-  Serial.println("TCP RESPONSE:");
-  Serial.println(connectResponse);
-
-  // ===================================================
-  // CEK CONNECT
-  // ===================================================
-
-  if (connectResponse.indexOf("CONNECT OK") == -1)
+  if (!initHTTP())
   {
-    Serial.println("ERROR: TCP tunnel gagal terhubung.");
-
-    sendAT("AT+CIPCLOSE", 5000);
+    Serial.println("HTTP initialization gagal.");
+    terminateHTTP();
     return;
   }
 
-  Serial.println("TCP CONNECTED");
+  // ---------------------------------------------------
+  // HTTP POST
+  // ---------------------------------------------------
 
-  // ===================================================
-  // HTTP REQUEST
-  // ===================================================
+  bool success = sendHTTPPost(json);
 
-  String request =
-    "POST " + String(PATH) + " HTTP/1.1\r\n"
-    "Host: " + String(HOST) + "\r\n"
-    "User-Agent: SIM800L-GPS\r\n"
-    "Content-Type: application/json\r\n"
-    "Content-Length: " + String(json.length()) + "\r\n"
-    "Connection: close\r\n"
-    "\r\n" +
-    json;
+  // ---------------------------------------------------
+  // TERMINATE
+  // ---------------------------------------------------
 
-  Serial.println();
-  Serial.println("================================");
-  Serial.println("HTTP REQUEST");
-  Serial.println("================================");
-  Serial.println(request);
-  Serial.println("================================");
+  terminateHTTP();
 
-  // ===================================================
-  // CIPSEND
-  // ===================================================
-
-  Serial.println("\nWaiting for > prompt...");
-
-  SIM800.println("AT+CIPSEND");
-
-  unsigned long start = millis();
-  bool prompt = false;
-
-  while (millis() - start < 10000)
+  if (success)
   {
-    if (SIM800.available())
-    {
-      String response = SIM800.readString();
-
-      Serial.println(response);
-
-      if (response.indexOf(">") != -1)
-      {
-        prompt = true;
-        break;
-      }
-    }
+    Serial.println("\nDATA GPS BERHASIL DIKIRIM.");
   }
-
-  if (!prompt)
+  else
   {
-    Serial.println("ERROR: Tidak mendapat prompt >");
-
-    sendAT("AT+CIPCLOSE", 5000);
-    return;
+    Serial.println("\nPENGIRIMAN GPS GAGAL.");
   }
-
-  Serial.println("> Prompt received");
-
-  // ===================================================
-  // SEND HTTP REQUEST
-  // ===================================================
-
-  SIM800.print(request);
-
-  delay(100);
-
-  // CTRL+Z
-  SIM800.write(0x1A);
-
-  // ===================================================
-  // WAIT FASTAPI RESPONSE
-  // ===================================================
-
-  Serial.println("\nWaiting FastAPI response...");
-
-  String response = readResponse(5000);
-
-  Serial.println();
-  Serial.println("================================");
-  Serial.println("FASTAPI RESPONSE");
-  Serial.println("================================");
-  Serial.println(response);
-  Serial.println("================================");
-
-  // ===================================================
-  // CLOSE
-  // ===================================================
-
-  sendAT("AT+CIPCLOSE", 5000);
 }
 
 // =====================================================
@@ -328,7 +575,7 @@ void sendGPS()
 
 void setup()
 {
-  Serial.begin(115200);
+  
 
   delay(2000);
 
@@ -348,21 +595,32 @@ void setup()
     SIM_TX
   );
 
+  pinMode(VIBRATION_PIN, INPUT);
+
+  lastVibrationState = digitalRead(VIBRATION_PIN);
+  Serial.begin(115200);
   delay(3000);
 
   Serial.println();
-  Serial.println("================================");
+  Serial.println("========================================");
   Serial.println("ESP32 + GPS + SIM800L");
-  Serial.println("GPS -> GPRS -> TCP -> PINGGY -> FASTAPI");
-  Serial.println("GPS FAIL LIMIT: 3");
-  Serial.println("SEND INTERVAL: 10 MINUTES");
-  Serial.println("================================");
+  Serial.println("SENSOR GETAR -> GPRS -> HTTP -> FASTAPI");
+  Serial.println("SERVER");
+  Serial.println("PORT: 8000");
+  Serial.println("PROTOCOL: HTTP AT COMMAND");
+  Serial.println("METHOD: POST");
+  Serial.println("CONTENT-TYPE: APPLICATION/JSON");
+  Serial.println("GPS TIDAK VALID: DATA DUMMY");
+  Serial.println("========================================");
 
-  setupGPRS();
+  // Setup GPRS
+  if (!setupGPRS())
+  {
+    Serial.println("\nPERINGATAN: GPRS GAGAL.");
+    Serial.println("Periksa SIM card, APN, sinyal, dan jaringan.");
+  }
 
-  delay(3000);
-
-  Serial.println("\nMenunggu GPS...");
+  Serial.println("\nMenunggu GPS dan sensor getar...");
 }
 
 // =====================================================
@@ -371,18 +629,15 @@ void setup()
 
 void loop()
 {
-  // ===================================================
-  // BACA GPS TERUS-MENERUS
-  // ===================================================
-
+  // Baca GPS terus-menerus
   while (GPS.available())
   {
     gps.encode(GPS.read());
   }
 
-  // ===================================================
-  // DEBUG GPS
-  // ===================================================
+  // ---------------------------------------------------
+  // GPS DEBUG SETIAP 5 DETIK
+  // ---------------------------------------------------
 
   static unsigned long lastGPSDebug = 0;
 
@@ -390,18 +645,18 @@ void loop()
   {
     lastGPSDebug = millis();
 
-    if (gps.location.isValid())
+    if (gps.location.isValid() &&
+        gps.location.age() < 10000)
     {
-      Serial.println();
-      Serial.println("GPS FIX OK");
+      Serial.println("\nGPS FIX OK");
 
-      Serial.print("Lat       : ");
+      Serial.print("Latitude : ");
       Serial.println(gps.location.lat(), 6);
 
-      Serial.print("Lon       : ");
+      Serial.print("Longitude: ");
       Serial.println(gps.location.lng(), 6);
 
-      Serial.print("Speed     : ");
+      Serial.print("Speed    : ");
 
       if (gps.speed.isValid())
       {
@@ -414,7 +669,7 @@ void loop()
 
       Serial.println(" km/h");
 
-      Serial.print("Altitude  : ");
+      Serial.print("Altitude : ");
 
       if (gps.altitude.isValid())
       {
@@ -429,18 +684,35 @@ void loop()
     }
     else
     {
-      Serial.println("GPS belum FIX...");
+      Serial.println("GPS belum FIX, data dummy tersedia.");
     }
   }
 
-  // ===================================================
-  // KIRIM SETIAP 10 MENIT
-  // ===================================================
+  // ---------------------------------------------------
+  // SENSOR GETAR LOW -> HIGH
+  // ---------------------------------------------------
 
-  if (millis() - lastSend >= SEND_INTERVAL)
+  int vibrationState = digitalRead(VIBRATION_PIN);
+
+  if (vibrationState == HIGH &&
+      lastVibrationState == LOW)
   {
-    lastSend = millis();
+    unsigned long now = millis();
 
-    sendGPS();
+    if (now - lastVibrationTime >= DEBOUNCE_TIME)
+    {
+      lastVibrationTime = now;
+
+      Serial.println("\n================================");
+      Serial.println("GETARAN TERDETEKSI!");
+      Serial.println("Mengirim GPS melalui HTTP POST...");
+      Serial.println("================================");
+
+      sendGPS();
+    }
   }
+
+  lastVibrationState = vibrationState;
+
+  delay(1);
 }
