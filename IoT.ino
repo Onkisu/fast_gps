@@ -212,7 +212,7 @@ bool setupGPRS()
   // Aktifkan GPRS
   response = sendAT(
     "AT+SAPBR=1,1",
-    15000
+    3000
   );
 
   if (response.indexOf("OK") == -1)
@@ -572,12 +572,10 @@ void sendGPS()
 // =====================================================
 // SETUP
 // =====================================================
-
-void setup()
+void initializeUART()
 {
-  
-
-  delay(2000);
+  // Serial USB
+  Serial.begin(115200);
 
   // GPS UART
   GPS.begin(
@@ -598,8 +596,28 @@ void setup()
   pinMode(VIBRATION_PIN, INPUT);
 
   lastVibrationState = digitalRead(VIBRATION_PIN);
-  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println("UART initialization completed.");
+}
+
+void setup()
+{
+  
+  delay(20000);
+  initializeUART();
+
+
+  Serial.println("\nSeluruh UART berhasil diinisialisasi.");
+ 
+
+  pinMode(VIBRATION_PIN, INPUT);
+
+  lastVibrationState = digitalRead(VIBRATION_PIN);
+  
   delay(3000);
+  
 
   Serial.println();
   Serial.println("========================================");
